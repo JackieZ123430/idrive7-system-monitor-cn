@@ -4,7 +4,7 @@ An activity monitor for BMW iDrive 7 head units (MGU): what uses the head unit's
 
 | App | Version | Internet | Reads from the car |
 | :--- | :---: | :---: | :--- |
-| [System Monitor](#system-monitor) | 1.0.7 | No | Nothing, only the head unit's own processes |
+| [System Monitor](#system-monitor) | 1.0.8 | No | Nothing, only the head unit's own processes |
 
 ## Install
 
@@ -18,7 +18,7 @@ An activity monitor for BMW iDrive 7 head units (MGU): what uses the head unit's
 
 Shows what uses the head unit's memory and processor, like a computer's activity monitor.
 
-- Overview, per-core processor use and temperature, and every app and program with its memory and how much it grew in the last 3 minutes, which makes leaks easy to spot. Tap any column heading to sort by it, again to reverse; tap a row for details.
+- Overview, per-core processor use and temperature, and every app and program with its memory and how much it grew in the last 3 minutes, which makes leaks easy to spot. Tap any column heading to sort by it, again to reverse; tap a row for its details, with a chart of its memory over those 3 minutes.
 - Apps from the MGU Store are shown by name, BMW's own apps by their user id.
 - It only reads `/proc` and `/sys`. It can't stop or change anything, and needs no car signals or internet.
 - Foreground only: nothing is read or drawn while the app is off screen, and leaving it lets go of everything it gathered. The head unit ends the idle process itself (an app may not quit on its own: the head unit treats that as a crash).
@@ -38,6 +38,7 @@ The temperature comes from the kernel's sensors (`/sys/class/thermal` and `/sys/
 - `python3 kit/tools/build.py sys_monitor` builds `dist/sys_monitor@<version>.mgu`. It needs `oap-sdk`, extracted from your own head unit with `kit/tools/extract_sdk.js`.
 - `node kit/tools/emu.js sys_monitor` runs the app in the browser emulator, with sample data on a computer without Linux `/proc`.
 - The tests are in `kit/tools/test_*.js` and run in CI on Node 8.9.4 and 8.16.2, the versions on the head units.
+- `node kit/tools/test_sys_monitor_layout.js [dir]` draws every page from the sample data and fails when a text leaves the page or its panel or overlaps another; with a folder, it also saves each page there as a PNG.
 
 For the platform itself (signals, renderer, controller input, deploying over SSH) see [idrive7-apps](https://github.com/cauliflowermossgrape/idrive7-apps).
 

@@ -33,6 +33,8 @@ const HISTORY_S = 180;                 // the chart's span, and the span growth 
 const TREND_MIN_S = 30;                // growth is shown once a row has been seen this long
 const MB = 1024 * 1024;
 const TOP = 44;                        // panels start under the tab bar
+const CHART_X = 1040;                  // a row's details: what it is on the left, its memory's chart from here
+const NAME_W = 760;                    // ...and its name over them, at most this wide (Back comes after it)
 
 /** Memory use's colour: fine, getting full, nearly full. */
 function pressure(t, frac) { return frac >= 0.9 ? t.crit : frac >= 0.75 ? t.warn : t.ok; }
@@ -51,6 +53,16 @@ function fitText(cv, str, maxW, size, opts) {
         if (cv.textWidth(str.slice(0, mid).replace(/\s+$/, '') + '..', size, opts) <= maxW) lo = mid; else hi = mid - 1;
     }
     return str.slice(0, lo).replace(/\s+$/, '') + '..';
+}
+/** names joined with ", ", as many as fit maxW whole (the first one always, cut by fitText if need be). */
+function fitList(cv, names, maxW, size, opts) {
+    let out = '';
+    for (let i = 0; i < names.length; i++) {
+        const next = out ? out + ', ' + names[i] : String(names[i]);
+        if (out && cv.textWidth(next, size, opts) > maxW) break;
+        out = next;
+    }
+    return out;
 }
 
 /** Where the apps are installed: the folder above this app's own (oap_<uid>/data), else the head unit's. */
@@ -170,7 +182,7 @@ mgu.run({
             list.forEach((r) => { r.grow = growth(r.key); });
             return sortRows(list, by, dir);
         }
-        function openDetail(r) { detail = { key: r.key, label: r.label }; redraw(); }
+        function openDetail(r) { detail = { key: r.key, label: r.label, scroll: 0 }; redraw(); }
         function closeDetail() { detail = null; redraw(); }
         /** The head unit lets an app see only its own processes: say so where the list would be. */
         function drawRestricted(cv, t, x, y) {
@@ -203,7 +215,8 @@ mgu.run({
                 cv.text(unit, x + used + 8, 142, Math.round(size * 0.5), t.dim, { font: 'bold' });
                 used += 8 + cv.textWidth(unit, Math.round(size * 0.5), { font: 'bold' });
             }
-            // the note: in what the number leaves free
+            // the note: in what the number leaves free (a list: as many of its names as fit whole)
+            if (Array.isArray(sub)) sub = fitList(cv, sub, w - used - 36, 22);
             if (sub) cv.text(fitText(cv, sub, w - used - 36, 22), x + w - 18, 142, 22, t.dim, { align: 'right' });
         }
 
@@ -221,7 +234,9 @@ mgu.run({
                 const frac = m.used / m.total, parts = breakdown(snap);
                 tile(cv, t, 0, 5, 'Memory in use', pct(frac * 100) + ' %', fmtBytes(m.used) + ' of ' + fmtBytes(m.total), pressure(t, frac));
                 tile(cv, t, 1, 5, 'iDrive apps', fmtBytes(parts.apps), 'and MainApp', t.text);
-                tile(cv, t, 2, 5, 'Other programs', fmtBytes(parts.programs), 'HMI, nav', t.text);
+                // (named: the largest of them, as many as fit; none where the head unit hides them)
+                const progs = snap.restricted ? [] : rows(true, 'mem').filter((r) => r.kind !== 'app').map((r) => r.label);
+                tile(cv, t, 2, 5, 'Other programs', fmtBytes(parts.programs), progs.slice(0, 3), t.text);
                 tile(cv, t, 3, 5, 'Available', fmtBytes(m.available), m.swapTotal ? 'swap ' + fmtBytes(m.swapUsed) : 'no swap', t.text);
             } else {
                 tile(cv, t, 0, 5, 'Memory', '--', 'not reported', t.dim);
@@ -347,20 +362,23 @@ mgu.run({
         }
 
         /* ---------- Processes ---------- */
-        const listGeo = { rowH: 46, count: 0, visible: 1 };
+        // the list that scrolls: the Processes page's, or the processes in a group's details (as last drawn)
+        const listGeo = { rowH: 46, count: 0, visible: 1 }, detailGeo = { rowH: 34, count: 0, visible: 1 };
         let scrollAcc = 0;
         ctx.onScroll((dy) => {
-            if (page !== PG_PROCS || detail) return false;
-            const max = Math.max(0, listGeo.count - listGeo.visible);
+            const inDetail = !!detail;
+            if (!inDetail && page !== PG_PROCS) return false;
+            const geo = inDetail ? detailGeo : listGeo, at = inDetail ? detail.scroll : scroll;
+            const max = Math.max(0, geo.count - geo.visible);
+            if (!max) return false;
             scrollAcc += dy;
-            const n = scrollAcc > 0 ? Math.floor(scrollAcc / listGeo.rowH) : Math.ceil(scrollAcc / listGeo.rowH);
-            if (!n) return (dy > 0 && scroll < max) || (dy < 0 && scroll > 0);
-            scrollAcc -= n * listGeo.rowH;
-            const next = Math.max(0, Math.min(max, scroll + n));
-            const moved = next !== scroll;
-            scroll = next;
+            const n = scrollAcc > 0 ? Math.floor(scrollAcc / geo.rowH) : Math.ceil(scrollAcc / geo.rowH);
+            if (!n) return (dy > 0 && at < max) || (dy < 0 && at > 0);
+            scrollAcc -= n * geo.rowH;
+            const next = Math.max(0, Math.min(max, at + n));
+            if (inDetail) detail.scroll = next; else scroll = next;
             redraw();
-            return moved;
+            return next !== at;
         });
 
         /** A filled sort arrow centred on (cx, cy): pointing up (up true) or down. */
@@ -429,7 +447,8 @@ mgu.run({
         /* ---------- a row's details ---------- */
         function drawDetail(cv, t) {
             const r = rows(detail.key.indexOf('pid:') !== 0, 'mem').find((g) => g.key === detail.key);
-            const name = r ? r.label + (r.self ? '  (this app)' : '') : detail.label;
+            // (cut to leave room for Back after it, and for the chart beside it)
+            const name = fitText(cv, r ? r.label + (r.self ? '  (this app)' : '') : detail.label, NAME_W, 26, { font: 'bold' });
             if (!r) {
                 const p = G.panel(cv, t, 24, 44, 1552, 468, name);
                 G.button(cv, t, 42 + cv.textWidth(name, 26, { font: 'bold' }) + 28, 57, 0, 40, 'Back', closeDetail, { key: 'back' });
@@ -445,8 +464,10 @@ mgu.run({
 
             const p = G.panel(cv, t, 24, 176, 1552, 336, name);
             // Back right after the title, as Fault Scanner puts its buttons (where the kit runs the screen; else the bar's page button)
-            G.button(cv, t, 42 + cv.textWidth(fitText(cv, name, 900, 26, { font: 'bold' }), 26, { font: 'bold' }) + 28, 189, 0, 40, 'Back', closeDetail, { key: 'back' });
-            const x = 48, iw = 1504, row = (y, label, value) => {
+            G.button(cv, t, 42 + cv.textWidth(name, 26, { font: 'bold' }) + 28, 189, 0, 40, 'Back', closeDetail, { key: 'back' });
+            drawDetailChart(cv, t, r, CHART_X, 226, p.x + p.w - 24 - CHART_X, p.y + p.h - 22 - 226);
+            detailGeo.count = 0;
+            const x = 48, iw = CHART_X - 48 - 48, row = (y, label, value) => {
                 cv.text(label.toUpperCase(), x, y, 20, t.dim, { font: 'bold', spacing: 1.2 });
                 cv.text(fitText(cv, value, iw - 300, 24), x + 280, y, 24, t.text);
             };
@@ -468,23 +489,52 @@ mgu.run({
                 if (cmd) row(y, 'Command', cmd);
                 return;
             }
-            // a group: its processes, the largest first
+            // a group: its processes, the largest first; a list that doesn't fit scrolls (a finger, the controller)
             cv.fillRect(x, y - 16, iw, 1, withAlpha(t.tick, 0.25));
-            const procs = r.procs.slice().sort((a, b) => b.mem - a.mem), bottom = p.y + p.h - 12;
-            const n = Math.max(0, Math.floor((bottom - y) / 34));
-            procs.slice(0, n).forEach((pr, i) => {
-                const ry = y + i * 34;
+            const procs = r.procs.slice().sort((a, b) => b.mem - a.mem), rowH = detailGeo.rowH, bottom = p.y + p.h - 22;
+            const top = y - 24, visible = Math.max(1, Math.floor((bottom - top) / rowH));
+            detail.scroll = Math.max(0, Math.min(detail.scroll || 0, procs.length - visible));
+            detailGeo.count = procs.length; detailGeo.visible = visible;
+            procs.slice(detail.scroll, detail.scroll + visible).forEach((pr, i) => {
+                const ry = y + i * rowH;
                 cv.text('PID ' + pr.pid, x, ry, 22, t.dim, { font: 'num' });
-                cv.text(fmtBytes(pr.mem), x + 360, ry, 24, t.text, { align: 'right', font: 'bold' });
-                cv.text(pr.cpu == null ? '--' : pct(pr.cpu) + ' %', x + 500, ry, 22, t.dim, { align: 'right', font: 'num' });
-                cv.text(fitText(cv, sampler.command(pr.pid) || pr.name, iw - 560, 22), x + 560, ry, 22, t.dim);
+                cv.text(fmtBytes(pr.mem), x + 300, ry, 24, t.text, { align: 'right', font: 'bold' });
+                cv.text(pr.cpu == null ? '--' : pct(pr.cpu) + ' %', x + 430, ry, 22, t.dim, { align: 'right', font: 'num' });
+                cv.text(fitText(cv, sampler.command(pr.pid) || pr.name, iw - 480 - 20, 22), x + 480, ry, 22, t.dim);
             });
-            if (procs.length > n) cv.text('and ' + (procs.length - n) + ' more', 1552, 212, 22, t.dim, { align: 'right' });
+            // where the list is: a bar at its right edge
+            if (procs.length > visible) {
+                cv.scroll = true;
+                const vis = visible * rowH, bh = Math.max(30, vis * visible / procs.length);
+                cv.roundRect(x + iw - 6, top + (vis - bh) * detail.scroll / Math.max(1, procs.length - visible), 6, bh, 3, withAlpha(t.text, 0.3));
+            }
+        }
+        /** A row's own memory over the last minutes, in the details' right part (x, y, w, h). */
+        function drawDetailChart(cv, t, r, x, y, w, h) {
+            cv.text('OWN MEMORY, LAST ' + Math.round(HISTORY_S / 60) + ' MIN', x, y, 20, t.dim, { font: 'bold', spacing: 1.2 });
+            const a = trend.get(r.key) || [], now = snap.at;
+            const pts = a.map((e) => [(e[0] - now) / 1000, e[1] / MB]);
+            const ys = pts.map((q) => q[1]), lo = ys.length ? Math.min.apply(null, ys) : 0, hi = ys.length ? Math.max.apply(null, ys) : 1;
+            // the line in the middle of a range of at least 8 MB and a tenth of its memory: a heap's usual ups and
+            // downs stay small, a steady rise shows (steps of 5, 10, 20, 50.. MB: whole MB on the axis)
+            const span = Math.max(hi - lo, 8, hi * 0.1) * 1.2, mid = (lo + hi) / 2;
+            const e = Math.pow(10, Math.floor(Math.log10(span / 3)));
+            const step = [1, 2, 5, 10].map((k) => k * e).find((v) => v >= span / 3) || span / 3;
+            const yMin = Math.max(0, Math.floor((mid - span / 2) / step) * step), yMax = Math.ceil((mid + span / 2) / step) * step;
+            const yFmt = (v) => Math.round(v) + ' MB';
+            let labelW = 0;
+            for (let v = yMin; v <= yMax + 1e-9; v += step) labelW = Math.max(labelW, cv.textWidth(yFmt(v), 16));
+            G.chart(cv, t, x, y + 18, w, h - 18, {
+                xMin: -HISTORY_S, xMax: 0, yMin, yMax, xStep: 60, yStep: step, padLeft: Math.ceil(labelW) + 14, yFmt,
+                xFmt: (v) => (v === 0 ? 'now' : v <= -HISTORY_S ? '' : Math.round(-v / 60) + ' min'),
+                series: [{ pts, color: growCol(t, r.grow, t.accent), fill: 0.18, width: 2.5 }],
+                empty: 'Collecting...',
+            });
         }
 
         /* ---------- frame ---------- */
         function frameSig() {
-            return [page, detail && detail.key, scroll, seq, sortBy, sortDir, settings.get('theme'), settings.get('group')].join('|');
+            return [page, detail && detail.key + ':' + detail.scroll, scroll, seq, sortBy, sortDir, settings.get('theme'), settings.get('group')].join('|');
         }
         let lastSig = '', lastDrawAt = 0;
         function loopFrame() {
