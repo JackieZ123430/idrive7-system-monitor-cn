@@ -21,7 +21,7 @@ Shows what uses the head unit's memory and processor, like a computer's activity
 - Overview, per-core processor use and temperature, and every app and program with its memory and how much it grew in the last 3 minutes, which makes leaks easy to spot. Tap any column heading to sort by it, again to reverse; tap a row for details.
 - Apps from the MGU Store are shown by name, BMW's own apps by their user id.
 - It only reads `/proc` and `/sys`. It can't stop or change anything, and needs no car signals or internet.
-- Nothing is read while the app is off screen.
+- Foreground only: nothing is read or drawn while the app is off screen, and leaving it lets go of everything it gathered. The head unit ends the idle process itself (an app may not quit on its own: the head unit treats that as a crash).
 
 | Processor | Processes |
 | :---: | :---: |
@@ -31,7 +31,7 @@ The screenshots show the sample data it uses in the emulator.
 
 ### No temperature tile?
 
-The temperature comes from the kernel's sensors (`/sys/class/thermal` and `/sys/class/hwmon`). When the head unit doesn't let an app read any of them, the tile is left out. The app's log (`sys_monitor.log` in its data folder) lists every sensor it found and the one it uses.
+The temperature comes from the kernel's sensors (`/sys/class/thermal` and `/sys/class/hwmon`). When the head unit doesn't let an app read any of them, the tile is left out, and the app's log (`sys_monitor.log` in its data folder) lists every sensor it found. The log only holds problems like this one; when everything works it stays empty.
 
 ## Development
 

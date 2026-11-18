@@ -34,7 +34,7 @@ Steps (run on the head unit, as root, inside this folder)
     each time; the stock one stays.
 
 3.  Check the car: Apps menu -> the new tiles. Logs per app:
-        /var/opt/public/oap/oap_<uid>/data/<app>.log
+        /var/opt/public/oap/oap_<uid>/data/<app>.log   (warnings and errors only)
     sh deploy-car.sh status
 
 Back to stock

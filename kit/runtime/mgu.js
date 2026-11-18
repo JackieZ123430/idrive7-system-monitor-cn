@@ -49,8 +49,15 @@ const RHMI_RES = path.join(APP_ROOT, 'rhmiData', 'resources');
 const uplink = require('./uplink');
 if (SPEC.mguInternet) { try { uplink.init(DATA_DIR); } catch (e) {} }
 
-/* ---------------- logging: SDK logger (DLT) + small rotating file ---------------- */
+/* ---------------- logging: problems only ---------------- */
+// The log file (and DLT) get warnings, errors and crashes, nothing else: info and debug lines are dropped
+// unless MGU_DEBUG is set. Each distinct problem is written at most once every 10 minutes, so a fault that
+// repeats every frame writes one line to the head unit's flash, not thousands. The SDK's own warnings and
+// its info lines about creating the screens are held in memory and written only if the app fails to start.
 const LOG_FILE = path.join(DATA_DIR, SPEC.id + '.log');
+const LOG_MAX = 64 * 1024;              // then it moves to .log.1 (one earlier file, dropped at the next start)
+const REPEAT_MS = 10 * 60 * 1000;       // the same problem again within this is counted, not written
+const DEBUG = !!process.env.MGU_DEBUG;
 const RUN_TAG = Date.now().toString(36);
 // leftovers: frames drawn by a run (software path) and the rotated log of an earlier one
 function dropLeftovers() {
@@ -58,46 +65,69 @@ function dropLeftovers() {
     try { fs.unlinkSync(LOG_FILE + '.1'); } catch (e) {}
 }
 dropLeftovers();
-function fileLog(level, msg) {
+function appendLog(text) {
     try {
         const st = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE) : null;
-        if (st && st.size > 256 * 1024) fs.renameSync(LOG_FILE, LOG_FILE + '.1');
-        fs.appendFileSync(LOG_FILE, new Date().toISOString() + ' ' + level + ' ' + msg + '\n');
+        if (st && st.size > LOG_MAX) fs.renameSync(LOG_FILE, LOG_FILE + '.1');
+        fs.appendFileSync(LOG_FILE, text);
     } catch (e) { /* data dir not writable (host preview) */ }
 }
-// The SDK can swallow the first RHMI resource error and fail later with a misleading
-// null entry-point factory. Preserve the original warnings/errors in the app log.
+const lastWritten = new Map();          // problem (level + first line) -> { at, skipped }
+function fileLog(level, msg) {
+    msg = String(msg);
+    let again = '';
+    if (level !== 'FATAL') {
+        const key = level + ' ' + msg.split('\n')[0].slice(0, 200), now = Date.now(), seen = lastWritten.get(key);
+        if (seen && now - seen.at < REPEAT_MS) { seen.skipped++; return; }
+        if (seen && seen.skipped) again = ' (and ' + seen.skipped + ' times since the last one)';
+        if (lastWritten.size > 200) lastWritten.clear();
+        lastWritten.set(key, { at: now, skipped: 0 });
+    }
+    appendLog(new Date().toISOString() + ' ' + level + again + ' ' + msg + '\n');
+}
+// The SDK can swallow the first RHMI resource error and fail later with a misleading null entry-point
+// factory, and its info lines say why it did not create the app's screens (a CONFIG_STATE start, a resource
+// error, or a newer SDK's "conditionalLoading rhmiLoadingEnabled skipping loading": issue #39). Hold them;
+// writeHeld() puts them in the log when the start fails.
+const held = [];
+function hold(level, msg) {
+    held.push(new Date().toISOString() + ' ' + level + ' ' + msg + '\n');
+    if (held.length > 30) held.shift();
+}
+function writeHeld() { if (held.length) appendLog(held.splice(0).join('')); }
 ['warn', 'error'].forEach((level) => {
     const original = sdkLog[level];
     sdkLog[level] = (...args) => {
         const message = args.map((x) => x && x.stack || String(x)).join(' ');
-        if (message.indexOf(SPEC.id + ': ') !== 0) fileLog('SDK_' + level.toUpperCase(), message);
+        if (message.indexOf(SPEC.id + ': ') !== 0) {
+            if (level === 'error') fileLog('SDK_ERROR', message); else hold('SDK_WARN', message);
+        }
         return original.apply(sdkLog, args);
     };
 });
-// ...and the SDK's info lines that say why it did not create the app's screens (a CONFIG_STATE start, a
-// resource error, or a newer SDK's "conditionalLoading rhmiLoadingEnabled skipping loading": issue #39)
 {
     const original = sdkLog.info;
     sdkLog.info = (...args) => {
         const message = args.map((x) => x && x.stack || String(x)).join(' ');
-        if (/conditionalLoading|_createRhmiApplication/.test(message) && message.indexOf(SPEC.id + ': ') !== 0) fileLog('SDK_INFO', message);
+        if (/conditionalLoading|_createRhmiApplication/.test(message) && message.indexOf(SPEC.id + ': ') !== 0) hold('SDK_INFO', message);
         return original.apply(sdkLog, args);
     };
 }
 const log = {};
 ['error', 'warn', 'info', 'debug'].forEach((lvl) => {
+    const quiet = lvl === 'info' || lvl === 'debug';
     log[lvl] = (...a) => {
+        if (quiet && !DEBUG) return;
         const msg = a.map((x) => (x && x.stack) ? x.stack : (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
         try { sdkLog[lvl](SPEC.id + ': ' + msg); } catch (e) {}
-        if (lvl !== 'debug' || process.env.MGU_DEBUG) fileLog(lvl.toUpperCase(), msg);
+        fileLog(lvl.toUpperCase(), msg);
     };
 });
 
 // crashes otherwise only reach DLT; keep the reason next to the app's log
-process.on('uncaughtException', (e) => { fileLog('FATAL', 'uncaught: ' + (e && e.stack || e)); process.exit(1); });
+process.on('uncaughtException', (e) => { writeHeld(); fileLog('FATAL', 'uncaught: ' + (e && e.stack || e)); process.exit(1); });
 process.on('exit', (code) => {
-    fileLog(code ? 'FATAL' : 'INFO', 'exit code ' + code + ' rss=' + Math.round(process.memoryUsage().rss / 1048576) + 'MB');
+    if (code) fileLog('FATAL', 'exit code ' + code + ' rss=' + Math.round(process.memoryUsage().rss / 1048576) + 'MB');
     dropLeftovers();
 });
 // a plain SIGTERM ends Node without 'exit' handlers: exit properly, after the app's own handlers
@@ -534,6 +564,7 @@ async function run(impl) {
     try { return await runInner(impl); } catch (e) {
         // log only: no process.exit here. On the car an unexpected exit makes CorruptAppsHandler
         // wipe the app's data, and a second one uninstalls a custom app.
+        writeHeld();
         fileLog('FATAL', 'start failed: ' + (e && e.stack || e));
         throw e;
     }
@@ -575,6 +606,7 @@ async function runInner(impl) {
     if (!app.rhmiApplication) {
         // The SDK did not create the app's screens: nothing can be shown. Stay up (idle) rather than throw: a
         // crash makes CorruptAppsHandler wipe the app's data, and a second one uninstalls it (issue #39).
+        writeHeld();
         log.error('the SDK created no RHMI application, so the app has no screens and does not start. ' +
             'Causes: the SDK config has rhmiLoadingEnabled off (an SDK extracted from a newer donor app; build.py ' +
             'turns it on - rebuild the app), a CONFIG_STATE start, or the HMI could not load the app\'s resources ' +

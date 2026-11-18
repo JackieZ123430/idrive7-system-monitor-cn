@@ -14,8 +14,9 @@
  * A viewer: it reads Linux /proc and the MGU Store's records (procs.js) and nothing else. It never writes a
  * file of its own besides what the kit keeps for every app (settings, log), never starts a program, signals or
  * ends a process, and opens no connection (kit/tools/test_sys_monitor.js fails the build if it ever does). It
- * runs as its own unprivileged uid, so the kernel would refuse it anyway. Foreground only: nothing is read
- * while the app is off screen. On a computer without /proc (the emulator on Windows) it shows sample data,
+ * runs as its own unprivileged uid, so the kernel would refuse it anyway. Foreground only: nothing is read or
+ * drawn while the app is off screen, and leaving it lets go of everything it gathered (the process itself stays
+ * until MainApp stops it: an app that exits on its own counts as a crash, see kit/runtime/mgu.js). On a computer without /proc (the emulator on Windows) it shows sample data,
  * and says so.
  */
 const path = require('path');
@@ -74,12 +75,13 @@ mgu.run({
     async start(ctx) {
         const { ui, settings, log, dataDir } = ctx;
 
-        let sampler = new Sampler({ oapDir: oapDirOf(dataDir), self: { title: ctx.spec.title } });
+        const newSampler = () => new Sampler({ oapDir: oapDirOf(dataDir), self: { title: ctx.spec.title } });
+        let sampler = newSampler();
         const sample = !sampler.available();
         if (sample) {
             sampler = new SampleSampler();
-            log.info('no Linux /proc here: showing sample data');
-        } else log.info('reading /proc; apps in ' + oapDirOf(dataDir));
+            log.debug('no Linux /proc here: showing sample data');
+        } else log.debug('reading /proc; apps in ' + oapDirOf(dataDir));
 
         let snap = null, seq = 0, timer = null;
         const history = [];                 // [at, memory used %, processor busy % or null]
@@ -108,11 +110,10 @@ mgu.run({
                     trend.set(r.key, a);
                 });
                 trend.forEach((a, k) => { if (!seen.has(k)) trend.delete(k); });
-                if (seq === 1) log.info('first sample: ' + snap.procs.length + ' processes (' + snap.hidden + ' not readable) in ' + (Date.now() - t0) + ' ms');
-                // which sensor the temperature is from, and every one found (what to look at when there is none)
-                if (seq === 1 && sampler.sensorList) {
-                    log.info('temperature: ' + (snap.temp ? snap.temp.zone + (snap.temp.board ? ' (board)' : '') : 'none')
-                        + '; sensors: ' + (sampler.sensorList().join(', ') || 'none found'));
+                if (seq === 1) log.debug('first sample: ' + snap.procs.length + ' processes (' + snap.hidden + ' not readable) in ' + (Date.now() - t0) + ' ms');
+                // no temperature tile: every sensor found, what to look at (README "No temperature tile?")
+                if (seq === 1 && !snap.temp && sampler.sensorList) {
+                    log.warn('no readable temperature sensor; sensors: ' + (sampler.sensorList().join(', ') || 'none found'));
                 }
             } catch (e) { log.warn('sample: ' + (e && e.stack || e)); }
             redraw();
@@ -143,13 +144,18 @@ mgu.run({
             // processor use needs two samples: the second comes after a second
             schedule(Math.min(1000, interval()));
         }
+        /** Off screen: stop, and let go of all that was gathered (it starts again from a fresh sample). */
+        function stopSampling() {
+            shown = false;
+            if (timer) { clearTimeout(timer); timer = null; }
+            snap = null; detail = null;
+            history.length = 0; trend.clear();
+            if (!sample) sampler = newSampler();        // drops its caches (processes' arguments, app names)
+            if (typeof global.gc === 'function') setTimeout(() => { try { global.gc(); } catch (e) { /* ignore */ } }, 0);
+        }
         if (ui.onVisible) ui.onVisible((name, visible) => {
             if (name !== 'MAIN') return;
-            if (visible) startSampling();
-            else {
-                shown = false;
-                if (timer) { clearTimeout(timer); timer = null; }
-            }
+            if (visible) startSampling(); else stopSampling();
         });
         settings.onChange((k) => {
             if (k === 'interval' && timer) schedule(interval());
@@ -500,7 +506,7 @@ mgu.run({
             await ui.image('MAIN_GFX', cv);
         }
         /** Draw now (after a tap, a sample, a setting); a failed frame is logged, the next one tries again. */
-        function redraw() { render().catch((e) => log.error('render', e)); }
+        function redraw() { if (shown) render().catch((e) => log.error('render', e)); }
 
         ui.onClick('BTN_PAGE', () => { page = (page + 1) % PAGES.length; detail = null; return render(); });
         ctx.onTab((i) => { page = i; detail = null; return render(); });
@@ -508,6 +514,6 @@ mgu.run({
         if (ctx.onLayout) ctx.onLayout(redraw);
         if (ui.isVisible && ui.isVisible('MAIN')) startSampling();
         await render();
-        log.info('System Monitor ready (' + (sample ? 'sample data' : '/proc') + ')');
+        log.debug('System Monitor ready (' + (sample ? 'sample data' : '/proc') + ')');
     },
 });
