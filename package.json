@@ -1,0 +1,11 @@
+{
+  "name": "idrive7-system-monitor",
+  "version": "1.0.0",
+  "description": "System Monitor for BMW iDrive 7 (MGU): what uses the head unit's memory and processor",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "python3 kit/tools/build.py",
+    "emu": "node kit/tools/emu.js"
+  }
+}
